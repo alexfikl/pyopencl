@@ -26,14 +26,16 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 """
 
-
-from typing import Any, Tuple
 import enum
-from pyopencl.tools import context_dependent_memoize
+from typing import Any, List, Optional, Tuple, Union
+
 import numpy as np
 import pyopencl as cl
+from pyopencl.tools import context_dependent_memoize
+
 from pytools import memoize_method
-from pyopencl.tools import (dtype_to_ctype, VectorArg, ScalarArg,
+from pyopencl.tools import (
+        dtype_to_ctype, Argument, VectorArg, ScalarArg,
         KernelTemplateBase, dtype_to_c_struct)
 
 
@@ -187,26 +189,37 @@ class ElementwiseKernel:
     A kernel that takes a number of scalar or vector *arguments* and performs
     an *operation* specified as a snippet of C on these arguments.
 
-    :arg arguments: a string formatted as a C argument list.
-    :arg operation: a snippet of C that carries out the desired 'map'
-        operation.  The current index is available as the variable *i*.
-        *operation* may contain the statement ``PYOPENCL_ELWISE_CONTINUE``,
-        which will terminate processing for the current element.
-    :arg name: the function name as which the kernel is compiled
-    :arg options: passed unmodified to :meth:`pyopencl.Program.build`.
-    :arg preamble: a piece of C source code that gets inserted outside of the
-        function context in the elementwise operation's kernel source code.
-
     .. warning :: Using a `return` statement in *operation* will lead to
         incorrect results, as some elements may never get processed. Use
         ``PYOPENCL_ELWISE_CONTINUE`` instead.
 
     .. versionchanged:: 2013.1
+
         Added ``PYOPENCL_ELWISE_CONTINUE``.
+
+    .. automethod:: __init__
+    .. automethod:: __call__
     """
 
-    def __init__(self, context, arguments, operation,
-            name="elwise_kernel", options=None, **kwargs):
+    def __init__(
+            self, context: "cl.Context",
+            arguments: Union[str, List[Argument]],
+            operation: str,
+            name: str = "elwise_kernel",
+            options: Any = None,
+            **kwargs: Any) -> None:
+        """
+        :arg arguments: A string formatted as a C argument list.
+        :arg operation: A snippet of C that carries out the desired 'map'
+            operation.  The current index is available as the variable *i*.
+            *operation* may contain the statement ``PYOPENCL_ELWISE_CONTINUE``,
+            which will terminate processing for the current element.
+        :arg name: The function name as which the kernel is compiled.
+        :arg options: Passed unmodified to :meth:`pyopencl.Program.build`.
+        :arg preamble: A piece of C source code that gets inserted outside of the
+            function context in the elementwise operation's kernel source code.
+        """
+
         self.context = context
         self.arguments = arguments
         self.operation = operation
@@ -224,41 +237,57 @@ class ElementwiseKernel:
         for arg in arg_descrs:
             if isinstance(arg, VectorArg) and not arg.with_offset:
                 from warnings import warn
-                warn("ElementwiseKernel '%s' used with VectorArgs that do not "
-                        "have offset support enabled. This usage is deprecated. "
-                        "Just pass with_offset=True to VectorArg, everything should "
-                        "sort itself out automatically." % self.name,
+                warn(
+                        f"{type(self).__name__} '{self.name}' used with VectorArgs "
+                        "that do not have offset support enabled. This usage is "
+                        "deprecated. Just pass 'with_offset=True' to 'VectorArg', "
+                        "everything should sort itself out automatically.",
                         DeprecationWarning)
 
-        if not [i for i, arg in enumerate(arg_descrs)
-                if isinstance(arg, VectorArg)]:
+        if not any(isinstance(arg, VectorArg) for arg in arg_descrs):
             raise RuntimeError(
-                "ElementwiseKernel can only be used with "
-                "functions that have at least one "
-                "vector argument")
+                f"{type(self).__name__} can only be used with functions that "
+                "have at least one vector argument")
+
         return knl, arg_descrs
 
-    def __call__(self, *args, **kwargs):
-        repr_vec = None
+    def __call__(
+            self, *args: Any,
+            queue: Optional["cl.CommandQueue"] = None,
+            wait_for: Optional[List["cl.Event"]] = None,
+            **kwargs: Any) -> "cl.Event":
+        """Invoke the generated scalar kernel.
+
+        The arguments may either be scalars or :class:`pyopencl.array.Array`
+        instances.
+
+        |std-enqueue-blurb|
+
+        :arg range: A :class:`slice` object. Specifies the range of indices on
+            which the kernel will be executed. May not be given at the same time
+            as *slice*.
+        :arg slice: A :class:`slice` object. Specifies the range of indices on
+            which the kernel will be executed, relative to the first vector-like
+            argument. May not be given at the same time as *range*.
+        :arg capture_as: a filename or file-like object to which the generated
+            code is written (see :meth:`pyopencl.Kernel.capture_call`).
+        """
 
         range_ = kwargs.pop("range", None)
         slice_ = kwargs.pop("slice", None)
         capture_as = kwargs.pop("capture_as", None)
+        if kwargs:
+            raise TypeError(f"unknown keyword arguments: '{', '.join(kwargs)}'")
 
         use_range = range_ is not None or slice_ is not None
         kernel, arg_descrs = self.get_kernel(use_range)
 
-        queue = kwargs.pop("queue", None)
-        wait_for = kwargs.pop("wait_for", None)
-
         if wait_for is None:
             wait_for = []
-        else:
-            # We'll be modifying it below.
-            wait_for = list(wait_for)
 
         # {{{ assemble arg array
 
+        repr_vec = None
         invocation_args = []
         for arg, arg_descr in zip(args, arg_descrs):
             if isinstance(arg_descr, VectorArg):
@@ -271,17 +300,13 @@ class ElementwiseKernel:
 
         # }}}
 
-        if kwargs:
-            raise TypeError("unknown keyword arguments: '%s'"
-                    % ", ".join(kwargs))
-
         if queue is None:
             queue = repr_vec.queue
 
         if slice_ is not None:
             if range_ is not None:
-                raise TypeError("may not specify both range and slice "
-                        "keyword arguments")
+                raise TypeError(
+                    "may not specify both range and slice keyword arguments")
 
             range_ = slice(*slice_.indices(repr_vec.size))
 
