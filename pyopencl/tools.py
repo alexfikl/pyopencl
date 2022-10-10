@@ -72,6 +72,16 @@ Testing
 
 .. autofunction:: pytest_generate_tests_for_pyopencl
 
+Argument types
+--------------
+
+.. autoclass:: Argument
+.. autoclass:: VectorArg
+.. autoclass:: ScalarArg
+.. autoclass:: OtherArg
+
+.. autofunction:: parse_arg_list
+
 Device Characterization
 -----------------------
 
