@@ -1,6 +1,5 @@
 """Scan primitive."""
 
-
 __copyright__ = """
 Copyright 2011-2012 Andreas Kloeckner
 Copyright 2008-2011 NVIDIA Corporation
@@ -22,14 +21,16 @@ limitations under the License.
 Derived from code within the Thrust project, https://github.com/thrust/thrust/
 """
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List
+from typing import Any, List, Optional, Tuple, Union
 
 import numpy as np
 
 import pyopencl as cl
-import pyopencl.array  # noqa
-from pyopencl.tools import (dtype_to_ctype, bitlog2,
+import pyopencl.array
+from pyopencl.tools import (
+        Argument, VectorArg, dtype_to_ctype, bitlog2,
         KernelTemplateBase, _process_code_for_macro,
         get_arg_list_scalar_arg_dtypes,
         context_dependent_memoize,
@@ -916,18 +917,35 @@ class ScanPerformanceWarning(UserWarning):
     pass
 
 
-class _GenericScanKernelBase:
+class _GenericScanKernelBase(ABC):
     # {{{ constructor, argument processing
 
-    def __init__(self, ctx, dtype,
-            arguments, input_expr, scan_expr, neutral, output_statement,
-            is_segment_start_expr=None, input_fetch_exprs=None,
-            index_dtype=np.int32,
-            name_prefix="scan", options=None, preamble="", devices=None):
+    def __init__(
+            self, ctx: "cl.Context", dtype: Any,
+            arguments: Union[str, List[Argument]],
+            input_expr: str,
+            scan_expr: str,
+            neutral: Optional[str],
+            output_statement: str,
+            is_segment_start_expr: Optional[str] = None,
+            input_fetch_exprs: Optional[List[Tuple[str, str, int]]] = None,
+            index_dtype: Any = np.int32,
+            name_prefix: str = "scan",
+            options: Any = None,
+            preamble: str = "",
+            devices: Optional[List["cl.Device"]] = None) -> None:
         """
-        :arg ctx: a :class:`pyopencl.Context` within which the code
-            for this scan kernel will be generated.
-        :arg dtype: the :class:`numpy.dtype` with which the scan will
+        The first array in the argument list determines the size of the index
+        space over which the scan is carried out, and thus the values over
+        which the index *i* occurring in a number of code fragments in
+        arguments above will vary.
+
+        All code fragments further have access to N, the number of elements
+        being processed in the scan.
+
+        :arg ctx: Context within which the code for this scan kernel will be
+            generated.
+        :arg dtype: The :class:`numpy.dtype` with which the scan will
             be performed. May be a structured type if that type was registered
             through :func:`pyopencl.tools.get_or_register_dtype`.
         :arg arguments: A string of comma-separated C argument declarations.
@@ -966,7 +984,7 @@ class _GenericScanKernelBase:
             by *input_fetch_expr*.
 
             This expression may also call functions given in the *preamble*.
-        :arg output_statement: a C statement that writes
+        :arg output_statement: A C statement that writes
             the output of the scan. It has access to the scan result as `item`,
             the preceding scan result item as `prev_item`, and the current index
             as `i`. `prev_item` in a segmented scan will be the neutral element
@@ -987,7 +1005,7 @@ class _GenericScanKernelBase:
 
             If it returns true, then previous sums will not spill over into the
             item with index *i* or subsequent items.
-        :arg input_fetch_exprs: a list of tuples *(NAME, ARG_NAME, OFFSET)*.
+        :arg input_fetch_exprs: A list of tuples *(NAME, ARG_NAME, OFFSET)*.
             An entry here has the effect of doing the equivalent of the following
             before input_expr::
 
@@ -996,14 +1014,6 @@ class _GenericScanKernelBase:
             `OFFSET` is allowed to be 0 or -1, and `ARG_NAME_TYPE` is the type
             of `ARG_NAME`.
         :arg preamble: |preamble|
-
-        The first array in the argument list determines the size of the index
-        space over which the scan is carried out, and thus the values over
-        which the index *i* occurring in a number of code fragments in
-        arguments above will vary.
-
-        All code fragments further have access to N, the number of elements
-        being processed in the scan.
         """
 
         if input_fetch_exprs is None:
@@ -1033,7 +1043,6 @@ class _GenericScanKernelBase:
 
         from pyopencl.tools import parse_arg_list
         self.parsed_args = parse_arg_list(arguments)
-        from pyopencl.tools import VectorArg
         self.first_array_idx = [
                 i for i, arg in enumerate(self.parsed_args)
                 if isinstance(arg, VectorArg)][0]
@@ -1088,7 +1097,7 @@ class _GenericScanKernelBase:
         # the scan kernel.
         self.kernel_key = (
             self.dtype,
-            tuple(arg.declarator() for arg in self.parsed_args),
+            tuple([arg.declarator() for arg in self.parsed_args]),
             self.input_expr,
             scan_expr,
             neutral,
@@ -1114,8 +1123,9 @@ class _GenericScanKernelBase:
 
     # }}}
 
+    @abstractmethod
     def finish_setup(self):
-        raise NotImplementedError
+        pass
 
 
 generic_scan_kernel_cache = WriteOncePersistentDict(
@@ -1140,13 +1150,14 @@ class GenericScanKernel(_GenericScanKernelBase):
         a = cl.array.arange(queue, 10000, dtype=np.int32)
         knl(a, queue=queue)
 
+    .. automethod:: __init__
+    .. automethod:: __call__
     """
 
     def finish_setup(self):
         # Before generating the kernel, see if it's cached.
         from pyopencl.cache import get_device_cache_id
-        devices_key = tuple(get_device_cache_id(device)
-                for device in self.devices)
+        devices_key = tuple([get_device_cache_id(device) for device in self.devices])
 
         cache_key = (self.kernel_key, devices_key)
 
@@ -1294,9 +1305,8 @@ class GenericScanKernel(_GenericScanKernelBase):
 
         # {{{ build second-level scan
 
-        from pyopencl.tools import VectorArg
-        second_level_arguments = self.parsed_args + [
-                VectorArg(self.dtype, "interval_sums")]
+        second_level_arguments = (
+            self.parsed_args + [VectorArg(self.dtype, "interval_sums")])
 
         second_level_build_kwargs = {}
         if self.is_segmented:
@@ -1439,13 +1449,26 @@ class GenericScanKernel(_GenericScanKernelBase):
 
     # }}}
 
-    def __call__(self, *args, **kwargs):
-        # {{{ argument processing
+    def __call__(
+            self, *args: Any,
+            size: Optional[int] = None,
+            queue: Optional["cl.CommandQueue"] = None,
+            allocator: Any = None,
+            wait_for: Optional[List["cl.Event"]] = None) -> "cl.Event":
+        """
+        *queue* and *allocator* default to the ones provided on the first
+        :class:`pyopencl.array.Array` in *args*. *size* may specify the
+        length of the scan to be carried out. If not given, this length
+        is inferred from the first array argument passed.
 
-        allocator = kwargs.get("allocator")
-        queue = kwargs.get("queue")
-        n = kwargs.get("size")
-        wait_for = kwargs.get("wait_for")
+        |std-enqueue-blurb|
+
+        .. note::
+
+            The returned :class:`pyopencl.Event` corresponds only to part of the
+            execution of the scan. It is not suitable for profiling.
+        """
+        # {{{ argument processing
 
         if wait_for is None:
             wait_for = []
@@ -1453,23 +1476,22 @@ class GenericScanKernel(_GenericScanKernelBase):
             wait_for = list(wait_for)
 
         if len(args) != len(self.parsed_args):
-            raise TypeError("expected %d arguments, got %d" %
-                    (len(self.parsed_args), len(args)))
+            raise TypeError(
+                f"expected {len(self.parsed_args)} arguments, got {len(args)}")
 
         first_array = args[self.first_array_idx]
         allocator = allocator or first_array.allocator
         queue = queue or first_array.queue
 
-        if n is None:
-            n, = first_array.shape
+        if size is None:
+            size, = first_array.shape
 
-        if n == 0:
+        if size == 0:
             # We're done here. (But pretend to return an event.)
             return cl.enqueue_marker(queue, wait_for=wait_for)
 
         data_args = []
         for arg_descr, arg_val in zip(self.parsed_args, args):
-            from pyopencl.tools import VectorArg
             if isinstance(arg_descr, VectorArg):
                 data_args.append(arg_val.base_data)
                 if arg_descr.with_offset:
@@ -1489,7 +1511,7 @@ class GenericScanKernel(_GenericScanKernelBase):
 
         from pytools import uniform_interval_splitting
         interval_size, num_intervals = uniform_interval_splitting(
-                n, unit_size, max_intervals)
+                size, unit_size, max_intervals)
 
         # {{{ allocate some buffers
 
@@ -1498,12 +1520,12 @@ class GenericScanKernel(_GenericScanKernelBase):
                 allocator=allocator)
 
         partial_scan_buffer = cl.array.empty(
-                queue, n, dtype=self.dtype,
+                queue, size, dtype=self.dtype,
                 allocator=allocator)
 
         if self.store_segment_start_flags:
             segment_start_flags = cl.array.empty(
-                    queue, n, dtype=np.bool8,
+                    queue, size, dtype=np.bool8,
                     allocator=allocator)
 
         # }}}
@@ -1511,7 +1533,7 @@ class GenericScanKernel(_GenericScanKernelBase):
         # {{{ first level scan of interval (one interval per block)
 
         scan1_args = data_args + [
-                partial_scan_buffer.data, n, interval_size, interval_results.data,
+                partial_scan_buffer.data, size, interval_size, interval_results.data,
                 ]
 
         if self.is_segmented:
@@ -1552,7 +1574,7 @@ class GenericScanKernel(_GenericScanKernelBase):
         # {{{ update intervals with result of interval scan
 
         upd_args = data_args + [
-                n, interval_size, interval_results.data, partial_scan_buffer.data]
+                size, interval_size, interval_results.data, partial_scan_buffer.data]
         if self.is_segmented:
             upd_args.append(first_segment_start_in_interval.data)
         if self.store_segment_start_flags:
@@ -1633,6 +1655,15 @@ void ${name_prefix}_debug_scan(
 
 
 class GenericDebugScanKernel(_GenericScanKernelBase):
+    """Performs the same function and has the same interface as
+    :class:`GenericScanKernel`, but uses a dead-simple, sequential scan.
+
+    Works best on CPU platforms, and helps isolate bugs in scans by removing the
+    potential for issues originating in parallel execution.
+
+    .. automethod:: __call__
+    """
+
     def finish_setup(self):
         scan_tpl = _make_template(DEBUG_SCAN_TEMPLATE)
         scan_src = str(scan_tpl.render(
@@ -1655,13 +1686,15 @@ class GenericDebugScanKernel(_GenericScanKernelBase):
                 + [self.index_dtype])
         self.kernel.set_scalar_arg_dtypes(scalar_arg_dtypes)
 
-    def __call__(self, *args, **kwargs):
-        # {{{ argument processing
+    def __call__(
+            self, *args: Any,
+            size: Optional[int] = None,
+            queue: Optional["cl.CommandQueue"] = None,
+            allocator: Any = None,
+            wait_for: Optional[List["cl.Event"]] = None) -> "cl.Event":
+        """See :meth:`GenericScanKernel.__call__`."""
 
-        allocator = kwargs.get("allocator")
-        queue = kwargs.get("queue")
-        n = kwargs.get("size")
-        wait_for = kwargs.get("wait_for")
+        # {{{ argument processing
 
         if wait_for is None:
             wait_for = []
@@ -1677,15 +1710,14 @@ class GenericDebugScanKernel(_GenericScanKernelBase):
         allocator = allocator or first_array.allocator
         queue = queue or first_array.queue
 
-        if n is None:
-            n, = first_array.shape
+        if size is None:
+            size, = first_array.shape
 
         scan_tmp = cl.array.empty(queue,
-                n, dtype=self.dtype,
+                size, dtype=self.dtype,
                 allocator=allocator)
 
         data_args = [scan_tmp.data]
-        from pyopencl.tools import VectorArg
         for arg_descr, arg_val in zip(self.parsed_args, args):
             if isinstance(arg_descr, VectorArg):
                 data_args.append(arg_val.base_data)
@@ -1698,7 +1730,7 @@ class GenericDebugScanKernel(_GenericScanKernelBase):
         # }}}
 
         return self.kernel(queue, (1,), (1,),
-                *(data_args + [n]), wait_for=wait_for)
+                *(data_args + [size]), wait_for=wait_for)
 
 # }}}
 
@@ -1815,7 +1847,6 @@ class ScanTemplate(KernelTemplateBase):
 
 @context_dependent_memoize
 def get_cumsum_kernel(context, input_dtype, output_dtype):
-    from pyopencl.tools import VectorArg
     return GenericScanKernel(
         context, output_dtype,
         arguments=[
