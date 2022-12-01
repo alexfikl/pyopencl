@@ -75,6 +75,10 @@ Testing
 Argument Types
 --------------
 
+.. autoclass:: AccessQualifier
+   :undoc-members:
+   :inherited-members:
+
 .. autoclass:: Argument
 .. autoclass:: DtypedArgument
 
@@ -126,6 +130,7 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 """
 
+import enum
 import re
 from abc import ABC, abstractmethod
 from sys import intern
@@ -738,42 +743,87 @@ def pytest_generate_tests_for_pyopencl(metafunc):
 
 # {{{ C argument lists
 
+@enum.unique
+class AccessQualifier(enum.Flag):
+    Read = enum.auto()
+    Write = enum.auto()
+
+
 class Argument(ABC):
     """
+    .. attribute:: name
+    .. attribute:: rw
+
+        An :class:`AccessQualifier` for this argument.
+
+    .. automethod:: qualifier
     .. automethod:: declarator
     """
 
+    def __init__(
+            self, name: str, *,
+            rw: Optional[AccessQualifier] = None) -> None:
+        self.name = name
+        self.rw = rw
+
+    def qualifier(self) -> str:
+        """
+        :returns: a string representing the access qualifiers for this argument,
+            e.g. ``const``.
+        """
+        if self.rw is None:
+            return ""
+
+        # NOTE: OpenCL images have better access qualifiers, see e.g.
+        #   https://registry.khronos.org/OpenCL/sdk/1.2/docs/man/xhtml/accessQualifiers.html
+        # but for simple arrays, this is the best we can do (?)
+        if AccessQualifier.Write in self.rw:
+            return ""
+        elif AccessQualifier.Read in self.rw:
+            return "const"
+        else:
+            raise ValueError(f"unknown access qualifier: '{self.rw}'")
+
     @abstractmethod
     def declarator(self) -> str:
-        pass
+        """
+        :returns: a string representing the full declaration for this argument.
+        """
 
 
 class DtypedArgument(Argument):
     """
     .. attribute:: name
     .. attribute:: dtype
+    .. attribute:: ctype
     """
 
-    def __init__(self, dtype: Any, name: str) -> None:
+    def __init__(
+            self, dtype: Any, name: str, *,
+            rw: Optional[AccessQualifier] = None) -> None:
+        super().__init__(name, rw=rw)
         self.dtype = np.dtype(dtype)
-        self.name = name
+        self.ctype = dtype_to_ctype(self.dtype)
 
     def __repr__(self) -> str:
-        return "{}({!r}, {})".format(
+        return "{}({!r}, {}, rw={!r})".format(
                 self.__class__.__name__,
                 self.name,
-                self.dtype)
+                self.dtype,
+                self.rw)
 
     def __eq__(self, other: Any) -> bool:
         return (type(self) is type(other)
                 and self.dtype == other.dtype
-                and self.name == other.name)
+                and self.name == other.name
+                and self.rw == other.rw)
 
     def __hash__(self) -> int:
         return (
                 hash(type(self))
                 ^ hash(self.dtype)
-                ^ hash(self.name))
+                ^ hash(self.name)
+                ^ hash(self.rw))
 
 
 class VectorArg(DtypedArgument):
@@ -782,17 +832,21 @@ class VectorArg(DtypedArgument):
     .. automethod:: __init__
     """
 
-    def __init__(self, dtype: Any, name: str, with_offset: bool = False) -> None:
-        super().__init__(dtype, name)
+    def __init__(
+            self, dtype: Any, name: str,
+            with_offset: bool = False, *,
+            rw: Optional[AccessQualifier] = None) -> None:
+        super().__init__(dtype, name, rw=rw)
         self.with_offset = with_offset
 
     def declarator(self) -> str:
+        decl_type = f"__global {self.qualifier()} {self.ctype}*"
+
         if self.with_offset:
-            # Two underscores -> less likelihood of a name clash.
-            return "__global {} *{}__base, long {}__offset".format(
-                    dtype_to_ctype(self.dtype), self.name, self.name)
+            # NOTE: Two underscores -> less likelihood of a name clash.
+            result = f"{decl_type} {self.name}__base, const long {self.name}__offset"
         else:
-            result = "__global {} *{}".format(dtype_to_ctype(self.dtype), self.name)
+            result = f"{decl_type} {self.name}"
 
         return result
 
@@ -808,13 +862,13 @@ class ScalarArg(DtypedArgument):
     """Inherits from :class:`DtypedArgument`."""
 
     def declarator(self):
-        return "{} {}".format(dtype_to_ctype(self.dtype), self.name)
+        return f"{self.qualifier()} {self.ctype} {self.name}"
 
 
 class OtherArg(Argument):
     def __init__(self, declarator: str, name: str) -> None:
+        super().__init__(name)
         self.decl = declarator
-        self.name = name
 
     def declarator(self) -> str:
         return self.decl
