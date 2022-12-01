@@ -36,6 +36,7 @@ from pytools import memoize_method
 
 import pyopencl as cl
 from pyopencl.tools import (
+    AccessQualifier,
     DtypedArgument,
     KernelTemplateBase,
     ScalarArg,
@@ -430,11 +431,13 @@ def get_decl_and_access_for_kind(name: str, kind: ArgumentKind) -> Tuple[str, st
 def get_take_kernel(context, dtype, idx_dtype, vec_count=1):
     idx_tp = dtype_to_ctype(idx_dtype)
 
-    args = ([VectorArg(dtype, f"dest{i}", with_offset=True)
+    args = ([VectorArg(dtype, f"dest{i}", with_offset=True, rw=AccessQualifier.Write)
              for i in range(vec_count)]
-            + [VectorArg(dtype, f"src{i}", with_offset=True)
+            + [VectorArg(dtype, f"src{i}", with_offset=True, rw=AccessQualifier.Read)
                for i in range(vec_count)]
-            + [VectorArg(idx_dtype, "idx", with_offset=True)])
+            + [VectorArg(idx_dtype, "idx", with_offset=True, rw=AccessQualifier.Read)
+               ]
+            )
     body = (
             f"{idx_tp} src_idx = idx[i];\n"
             + "\n".join(
@@ -452,16 +455,19 @@ def get_take_put_kernel(context, dtype, idx_dtype, with_offsets, vec_count=1):
     idx_tp = dtype_to_ctype(idx_dtype)
 
     args = [
-            VectorArg(dtype, f"dest{i}")
+            VectorArg(dtype, f"dest{i}", rw=AccessQualifier.Write)
             for i in range(vec_count)
             ] + [
-                VectorArg(idx_dtype, "gmem_dest_idx", with_offset=True),
-                VectorArg(idx_dtype, "gmem_src_idx", with_offset=True),
+                VectorArg(idx_dtype, "gmem_dest_idx", with_offset=True,
+                          rw=AccessQualifier.Read),
+                VectorArg(idx_dtype, "gmem_src_idx", with_offset=True,
+                          rw=AccessQualifier.Read),
             ] + [
-                VectorArg(dtype, f"src{i}", with_offset=True)
+                VectorArg(dtype, f"src{i}", with_offset=True,
+                          rw=AccessQualifier.Read)
                 for i in range(vec_count)
             ] + [
-                ScalarArg(idx_dtype, f"offset{i}")
+                ScalarArg(idx_dtype, f"offset{i}", rw=AccessQualifier.Read)
                 for i in range(vec_count) if with_offsets
             ]
 
@@ -486,17 +492,21 @@ def get_put_kernel(context, dtype, idx_dtype, vec_count=1):
     idx_tp = dtype_to_ctype(idx_dtype)
 
     args = [
-            VectorArg(dtype, f"dest{i}", with_offset=True)
+            VectorArg(dtype, f"dest{i}", with_offset=True, rw=AccessQualifier.Write)
             for i in range(vec_count)
             ] + [
-                VectorArg(idx_dtype, "gmem_dest_idx", with_offset=True),
+                VectorArg(idx_dtype, "gmem_dest_idx", with_offset=True,
+                          rw=AccessQualifier.Read),
             ] + [
-                VectorArg(dtype, f"src{i}", with_offset=True)
+                VectorArg(dtype, f"src{i}", with_offset=True,
+                          rw=AccessQualifier.Read)
                 for i in range(vec_count)
             ] + [
-                VectorArg(np.uint8, "use_fill", with_offset=True)
+                VectorArg(np.uint8, "use_fill", with_offset=True,
+                          rw=AccessQualifier.Read)
             ] + [
-                VectorArg(np.int64, "val_ary_lengths", with_offset=True)
+                VectorArg(np.int64, "val_ary_lengths", with_offset=True,
+                          rw=AccessQualifier.Read)
             ]
 
     body = (
@@ -529,7 +539,7 @@ def get_copy_kernel(context, dtype_dest, dtype_src):
         raise TypeError("copying between non-identical struct types")
 
     return get_elwise_kernel(context,
-            "{tp_dest} *dest, {tp_src} *src".format(
+            "{tp_dest} *dest, const {tp_src} *src".format(
                 tp_dest=dtype_to_ctype(dtype_dest),
                 tp_src=dtype_to_ctype(dtype_src),
                 ),
@@ -586,7 +596,7 @@ def get_axpbyz_kernel(context, dtype_x, dtype_y, dtype_z,
         result = f"{ax} + {by}"
 
     return get_elwise_kernel(context,
-            "{tp_z} *z, {tp_z} a, {tp_x} *x, {tp_z} b, {tp_y} *y".format(
+            "{tp_z} *z, {tp_z} a, const {tp_x} *x, {tp_z} b, const {tp_y} *y".format(
                 tp_x=dtype_to_ctype(dtype_x),
                 tp_y=dtype_to_ctype(dtype_y),
                 tp_z=dtype_to_ctype(dtype_z),
@@ -646,7 +656,7 @@ def get_axpbz_kernel(context, dtype_a, dtype_x, dtype_b, dtype_z):
         expr = f"{ax} + {b}"
 
     return get_elwise_kernel(context,
-            "{tp_z} *z, {tp_a} a, {tp_x} *x,{tp_b} b".format(
+            "{tp_z} *z, {tp_a} a, const {tp_x} *x, {tp_b} b".format(
                 tp_a=dtype_to_ctype(dtype_a),
                 tp_x=dtype_to_ctype(dtype_x),
                 tp_b=dtype_to_ctype(dtype_b),
@@ -680,7 +690,7 @@ def get_multiply_kernel(context, dtype_x, dtype_y, dtype_z,
         xy = f"{x} * {y}"
 
     return get_elwise_kernel(context,
-            "{tp_z} *z, {tp_x} *x, {tp_y} *y".format(
+            "{tp_z} *z, const {tp_x} *x, const {tp_y} *y".format(
                 tp_x=dtype_to_ctype(dtype_x),
                 tp_y=dtype_to_ctype(dtype_y),
                 tp_z=dtype_to_ctype(dtype_z),
@@ -723,7 +733,7 @@ def get_divide_kernel(context, dtype_x, dtype_y, dtype_z,
         xoy = "{}_cast({})".format(complex_dtype_to_name(dtype_z), xoy)
 
     return get_elwise_kernel(context,
-            "{tp_z} *z, {tp_x} *x, {tp_y} *y".format(
+            "{tp_z} *z, const {tp_x} *x, const {tp_y} *y".format(
                 tp_x=dtype_to_ctype(dtype_x),
                 tp_y=dtype_to_ctype(dtype_y),
                 tp_z=dtype_to_ctype(dtype_z),
@@ -758,7 +768,7 @@ def get_rdivide_elwise_kernel(context, dtype_x, dtype_y, dtype_z):
         yox = f"{y} / {x}"
 
     return get_elwise_kernel(context,
-            "{tp_z} *z, {tp_x} *x, {tp_y} y".format(
+            "{tp_z} *z, const {tp_x} *x, const {tp_y} y".format(
                 tp_x=dtype_to_ctype(dtype_x),
                 tp_y=dtype_to_ctype(dtype_y),
                 tp_z=dtype_to_ctype(dtype_z),
@@ -770,7 +780,7 @@ def get_rdivide_elwise_kernel(context, dtype_x, dtype_y, dtype_z):
 @context_dependent_memoize
 def get_fill_kernel(context, dtype):
     return get_elwise_kernel(context,
-            "{tp} *z, {tp} a".format(tp=dtype_to_ctype(dtype)),
+            "{tp} *z, const {tp} a".format(tp=dtype_to_ctype(dtype)),
             "z[i] = a",
             preamble=dtype_to_c_struct(context.devices[0], dtype),
             name="fill")
@@ -779,7 +789,7 @@ def get_fill_kernel(context, dtype):
 @context_dependent_memoize
 def get_reverse_kernel(context, dtype):
     return get_elwise_kernel(context,
-            "{tp} *z, {tp} *y".format(tp=dtype_to_ctype(dtype)),
+            "{tp} *z, const {tp} *y".format(tp=dtype_to_ctype(dtype)),
             "z[i] = y[n-1-i]",
             name="reverse")
 
@@ -794,9 +804,9 @@ def get_arange_kernel(context, dtype):
         expr = f"start + (({dtype_to_ctype(dtype)}) i) * step"
 
     return get_elwise_kernel(context, [
-        VectorArg(dtype, "z", with_offset=True),
-        ScalarArg(dtype, "start"),
-        ScalarArg(dtype, "step"),
+        VectorArg(dtype, "z", with_offset=True, rw=AccessQualifier.Write),
+        ScalarArg(dtype, "start", rw=AccessQualifier.Read),
+        ScalarArg(dtype, "step", rw=AccessQualifier.Read),
         ],
         f"z[i] = {expr}",
         name="arange")
@@ -844,7 +854,7 @@ def get_pow_kernel(context, dtype_x, dtype_y, dtype_z,
         result = f"pow({x}, {y})"
 
     return get_elwise_kernel(context,
-            ("{tp_z} *z, " + x_ctype + ", " + y_ctype).format(
+            ("{tp_z} *z, const " + x_ctype + ", const " + y_ctype).format(
                 tp_x=dtype_to_ctype(dtype_x),
                 tp_y=dtype_to_ctype(dtype_y),
                 tp_z=dtype_to_ctype(dtype_z),
@@ -856,8 +866,8 @@ def get_pow_kernel(context, dtype_x, dtype_y, dtype_z,
 @context_dependent_memoize
 def get_unop_kernel(context, operator, res_dtype, in_dtype):
     return get_elwise_kernel(context, [
-        VectorArg(res_dtype, "z", with_offset=True),
-        VectorArg(in_dtype, "y", with_offset=True),
+        VectorArg(res_dtype, "z", with_offset=True, rw=AccessQualifier.Write),
+        VectorArg(in_dtype, "y", with_offset=True, rw=AccessQualifier.Read),
         ],
         f"z[i] = {operator} y[i]",
         name="unary_op_kernel")
@@ -866,9 +876,9 @@ def get_unop_kernel(context, operator, res_dtype, in_dtype):
 @context_dependent_memoize
 def get_array_scalar_binop_kernel(context, operator, dtype_res, dtype_a, dtype_b):
     return get_elwise_kernel(context, [
-        VectorArg(dtype_res, "out", with_offset=True),
-        VectorArg(dtype_a, "a", with_offset=True),
-        ScalarArg(dtype_b, "b"),
+        VectorArg(dtype_res, "out", with_offset=True, rw=AccessQualifier.Write),
+        VectorArg(dtype_a, "a", with_offset=True, rw=AccessQualifier.Read),
+        ScalarArg(dtype_b, "b", rw=AccessQualifier.Read),
         ],
         f"out[i] = a[i] {operator} b",
         name="scalar_binop_kernel")
@@ -880,9 +890,9 @@ def get_array_binop_kernel(context, operator, dtype_res, dtype_a, dtype_b,
     a = "a[0]" if a_is_scalar else "a[i]"
     b = "b[0]" if b_is_scalar else "b[i]"
     return get_elwise_kernel(context, [
-        VectorArg(dtype_res, "out", with_offset=True),
-        VectorArg(dtype_a, "a", with_offset=True),
-        VectorArg(dtype_b, "b", with_offset=True),
+        VectorArg(dtype_res, "out", with_offset=True, rw=AccessQualifier.Write),
+        VectorArg(dtype_a, "a", with_offset=True, rw=AccessQualifier.Read),
+        VectorArg(dtype_b, "b", with_offset=True, rw=AccessQualifier.Read),
         ],
         f"out[i] = {a} {operator} {b}",
         name="binop_kernel")
@@ -891,9 +901,9 @@ def get_array_binop_kernel(context, operator, dtype_res, dtype_a, dtype_b,
 @context_dependent_memoize
 def get_array_scalar_comparison_kernel(context, operator, dtype_a):
     return get_elwise_kernel(context, [
-        VectorArg(np.int8, "out", with_offset=True),
-        VectorArg(dtype_a, "a", with_offset=True),
-        ScalarArg(dtype_a, "b"),
+        VectorArg(np.int8, "out", with_offset=True, rw=AccessQualifier.Write),
+        VectorArg(dtype_a, "a", with_offset=True, rw=AccessQualifier.Read),
+        ScalarArg(dtype_a, "b", rw=AccessQualifier.Read),
         ],
         f"out[i] = a[i] {operator} b",
         name="scalar_comparison_kernel")
@@ -902,9 +912,9 @@ def get_array_scalar_comparison_kernel(context, operator, dtype_a):
 @context_dependent_memoize
 def get_array_comparison_kernel(context, operator, dtype_a, dtype_b):
     return get_elwise_kernel(context, [
-        VectorArg(np.int8, "out", with_offset=True),
-        VectorArg(dtype_a, "a", with_offset=True),
-        VectorArg(dtype_b, "b", with_offset=True),
+        VectorArg(np.int8, "out", with_offset=True, rw=AccessQualifier.Write),
+        VectorArg(dtype_a, "a", with_offset=True, rw=AccessQualifier.Read),
+        VectorArg(dtype_b, "b", with_offset=True, rw=AccessQualifier.Read),
         ],
         f"out[i] = a[i] {operator} b[i]",
         name="comparison_kernel")
@@ -916,8 +926,8 @@ def get_unary_func_kernel(context, func_name, in_dtype, out_dtype=None):
         out_dtype = in_dtype
 
     return get_elwise_kernel(context, [
-        VectorArg(out_dtype, "z", with_offset=True),
-        VectorArg(in_dtype, "y", with_offset=True),
+        VectorArg(out_dtype, "z", with_offset=True, rw=AccessQualifier.Write),
+        VectorArg(in_dtype, "y", with_offset=True, rw=AccessQualifier.Read),
         ],
         f"z[i] = {func_name}(y[i])",
         name=f"{func_name}_kernel")
@@ -930,9 +940,9 @@ def get_binary_func_kernel(context, func_name, x_dtype, y_dtype, out_dtype,
         name = func_name
 
     return get_elwise_kernel(context, [
-        VectorArg(out_dtype, "z", with_offset=True),
-        VectorArg(x_dtype, "x", with_offset=True),
-        VectorArg(y_dtype, "y", with_offset=True),
+        VectorArg(out_dtype, "z", with_offset=True, rw=AccessQualifier.Write),
+        VectorArg(x_dtype, "x", with_offset=True, rw=AccessQualifier.Read),
+        VectorArg(y_dtype, "y", with_offset=True, rw=AccessQualifier.Read),
         ],
         f"z[i] = {func_name}(x[i], y[i])",
         name=f"{name}_kernel",
@@ -957,9 +967,9 @@ def get_float_binary_func_kernel(context, func_name, x_dtype, y_dtype,
         arg_type = "float"
 
     return get_elwise_kernel(context, [
-        VectorArg(out_dtype, "z", with_offset=True),
-        VectorArg(x_dtype, "x", with_offset=True),
-        VectorArg(y_dtype, "y", with_offset=True),
+        VectorArg(out_dtype, "z", with_offset=True, rw=AccessQualifier.Write),
+        VectorArg(x_dtype, "x", with_offset=True, rw=AccessQualifier.Read),
+        VectorArg(y_dtype, "y", with_offset=True, rw=AccessQualifier.Read),
         ],
         f"z[i] = {func_name}(({arg_type})x[i], ({arg_type})y[i])",
         name=f"{name}_kernel",
@@ -977,9 +987,10 @@ def get_fmod_kernel(context, out_dtype=np.float32, arg_dtype=np.float32,
 def get_modf_kernel(context, int_dtype=np.float32,
                     frac_dtype=np.float32, x_dtype=np.float32):
     return get_elwise_kernel(context, [
-        VectorArg(int_dtype, "intpart", with_offset=True),
-        VectorArg(frac_dtype, "fracpart", with_offset=True),
-        VectorArg(x_dtype, "x", with_offset=True),
+        VectorArg(int_dtype, "intpart", with_offset=True, rw=AccessQualifier.Write),
+        VectorArg(frac_dtype, "fracpart", with_offset=True,
+                  rw=AccessQualifier.Write),
+        VectorArg(x_dtype, "x", with_offset=True, rw=AccessQualifier.Read),
         ],
         """
         fracpart[i] = modf(x[i], &intpart[i])
@@ -991,9 +1002,11 @@ def get_modf_kernel(context, int_dtype=np.float32,
 def get_frexp_kernel(context, sign_dtype=np.float32, exp_dtype=np.float32,
                      x_dtype=np.float32):
     return get_elwise_kernel(context, [
-        VectorArg(sign_dtype, "significand", with_offset=True),
-        VectorArg(exp_dtype, "exponent", with_offset=True),
-        VectorArg(x_dtype, "x", with_offset=True),
+        VectorArg(sign_dtype, "significand", with_offset=True,
+                  rw=AccessQualifier.Write),
+        VectorArg(exp_dtype, "exponent", with_offset=True,
+                  rw=AccessQualifier.Write),
+        VectorArg(x_dtype, "x", with_offset=True, rw=AccessQualifier.Read),
         ],
         """
         int expt = 0;
@@ -1029,7 +1042,7 @@ def get_minmaximum_kernel(context, minmax, dtype_z, dtype_x, dtype_y,
     decl_y, acc_y = get_decl_and_access_for_kind("y", kind_y)
 
     return get_elwise_kernel(context,
-            f"{tp_z} *z, {tp_x} {decl_x}, {tp_y} {decl_y}",
+            f"{tp_z} *z, const {tp_x} {decl_x}, const {tp_y} {decl_y}",
             f"z[i] = {reduce_func}({acc_x}, {acc_y})",
             name=f"{minmax}imum",
             preamble="""
@@ -1043,9 +1056,9 @@ def get_bessel_kernel(context, which_func, out_dtype=np.float64,
                       order_dtype=np.int32, x_dtype=np.float64):
     if x_dtype.kind != "c":
         return get_elwise_kernel(context, [
-            VectorArg(out_dtype, "z", with_offset=True),
-            ScalarArg(order_dtype, "ord_n"),
-            VectorArg(x_dtype, "x", with_offset=True),
+            VectorArg(out_dtype, "z", with_offset=True, rw=AccessQualifier.Write),
+            ScalarArg(order_dtype, "ord_n", rw=AccessQualifier.Read),
+            VectorArg(x_dtype, "x", with_offset=True, rw=AccessQualifier.Read),
             ],
             f"z[i] = bessel_{which_func}n(ord_n, x[i])",
             name=f"bessel_{which_func}n_kernel",
@@ -1066,9 +1079,9 @@ def get_bessel_kernel(context, which_func, out_dtype=np.float64,
             raise NotImplementedError("different input/output types")
 
         return get_elwise_kernel(context, [
-            VectorArg(out_dtype, "z", with_offset=True),
-            ScalarArg(order_dtype, "ord_n"),
-            VectorArg(x_dtype, "x", with_offset=True),
+            VectorArg(out_dtype, "z", with_offset=True, rw=AccessQualifier.Write),
+            ScalarArg(order_dtype, "ord_n", rw=AccessQualifier.Read),
+            VectorArg(x_dtype, "x", with_offset=True, rw=AccessQualifier.Read),
             ],
             """
             cdouble_t jv_loc;
@@ -1095,9 +1108,9 @@ def get_hankel_01_kernel(context, out_dtype, x_dtype):
         raise NotImplementedError("different input/output types")
 
     return get_elwise_kernel(context, [
-        VectorArg(out_dtype, "h0", with_offset=True),
-        VectorArg(out_dtype, "h1", with_offset=True),
-        VectorArg(x_dtype, "x", with_offset=True),
+        VectorArg(out_dtype, "h0", with_offset=True, rw=AccessQualifier.Write),
+        VectorArg(out_dtype, "h1", with_offset=True, rw=AccessQualifier.Write),
+        VectorArg(x_dtype, "x", with_offset=True, rw=AccessQualifier.Read),
         ],
         """
         cdouble_t h0_loc;
@@ -1120,8 +1133,8 @@ def get_hankel_01_kernel(context, out_dtype, x_dtype):
 @context_dependent_memoize
 def get_diff_kernel(context, dtype):
     return get_elwise_kernel(context, [
-            VectorArg(dtype, "result", with_offset=True),
-            VectorArg(dtype, "array", with_offset=True),
+            VectorArg(dtype, "result", with_offset=True, rw=AccessQualifier.Write),
+            VectorArg(dtype, "array", with_offset=True, rw=AccessQualifier.Read),
             ],
             "result[i] = array[i+1] - array[i]",
             name="diff")
@@ -1134,23 +1147,29 @@ def get_if_positive_kernel(
         is_then_scalar, is_else_scalar):
     if is_then_array:
         then_ = "then_[0]" if is_then_scalar else "then_[i]"
-        then_arg = VectorArg(then_else_dtype, "then_", with_offset=True)
+        then_arg = VectorArg(then_else_dtype, "then_", with_offset=True,
+                             rw=AccessQualifier.Read)
     else:
         assert is_then_scalar
         then_ = "then_"
-        then_arg = ScalarArg(then_else_dtype, "then_")
+        then_arg = ScalarArg(then_else_dtype, "then_",
+                             rw=AccessQualifier.Read)
 
     if is_else_array:
         else_ = "else_[0]" if is_else_scalar else "else_[i]"
-        else_arg = VectorArg(then_else_dtype, "else_", with_offset=True)
+        else_arg = VectorArg(then_else_dtype, "else_", with_offset=True,
+                             rw=AccessQualifier.Read)
     else:
         assert is_else_scalar
         else_ = "else_"
-        else_arg = ScalarArg(then_else_dtype, "else_")
+        else_arg = ScalarArg(then_else_dtype, "else_",
+                             rw=AccessQualifier.Read)
 
     return get_elwise_kernel(context, [
-            VectorArg(then_else_dtype, "result", with_offset=True),
-            VectorArg(crit_dtype, "crit", with_offset=True),
+            VectorArg(then_else_dtype, "result", with_offset=True,
+                      rw=AccessQualifier.Write),
+            VectorArg(crit_dtype, "crit", with_offset=True,
+                      rw=AccessQualifier.Read),
             then_arg, else_arg,
             ],
             f"result[i] = crit[i] > 0 ? {then_} : {else_}",
