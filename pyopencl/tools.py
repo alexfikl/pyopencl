@@ -806,7 +806,7 @@ class DtypedArgument(Argument):
         self.ctype = dtype_to_ctype(self.dtype)
 
     def __repr__(self) -> str:
-        return "{}({!r}, {}, rw={!r})".format(
+        return "{}({!r}, {}, rw={})".format(
                 self.__class__.__name__,
                 self.name,
                 self.dtype,
@@ -891,16 +891,23 @@ def parse_c_arg(c_arg: str, with_offset: bool = False) -> DtypedArgument:
             raise RuntimeError("cannot deal with local or constant "
                     "OpenCL address spaces in C argument lists ")
 
-    c_arg = c_arg.replace("__global", "")
-
-    if with_offset:
-        def vec_arg_factory(dtype, name):
-            return VectorArg(dtype, name, with_offset=True)
+    # FIXME: should need to distinguish between `const X*` and `X* const`
+    if "const" in c_arg:
+        rw = AccessQualifier.Read
     else:
-        vec_arg_factory = VectorArg
+        rw = AccessQualifier.Read | AccessQualifier.Write
+
+    c_arg = c_arg.replace("__global", "")
+    c_arg = c_arg.replace("const", "")
+
+    def vector_arg_factory(dtype, name):
+        return VectorArg(dtype, name, with_offset=with_offset, rw=rw)
+
+    def scalar_arg_factory(dtype, name):
+        return ScalarArg(dtype, name, rw=rw)
 
     from pyopencl.compyte.dtypes import parse_c_arg_backend
-    return parse_c_arg_backend(c_arg, ScalarArg, vec_arg_factory)
+    return parse_c_arg_backend(c_arg, scalar_arg_factory, vector_arg_factory)
 
 
 def parse_arg_list(
@@ -960,14 +967,14 @@ def get_arg_list_scalar_arg_dtypes(
 def get_arg_offset_adjuster_code(arg_types):
     result = []
 
-    for arg_type in arg_types:
-        if isinstance(arg_type, VectorArg) and arg_type.with_offset:
-            result.append("__global %(type)s *%(name)s = "
-                    "(__global %(type)s *) "
-                    "((__global char *) %(name)s__base + %(name)s__offset);"
-                    % {
-                        "type": dtype_to_ctype(arg_type.dtype),
-                        "name": arg_type.name})
+    for arg in arg_types:
+        if isinstance(arg, VectorArg) and arg.with_offset:
+            qualifier = arg.qualifier()
+            result.append(
+                f"__global {qualifier} {arg.ctype} *{arg.name} = "
+                f"(__global {qualifier} {arg.ctype} *) "
+                f"((__global {qualifier} char *) "
+                f"{arg.name}__base + {arg.name}__offset);")
 
     return "\n".join(result)
 
